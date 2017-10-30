@@ -31,10 +31,11 @@ function islandora_handle_construct_handle(AbstractObject $object) {
     ));
   }
   else {
-    $target = $hostvar . url("islandora/object/$suffix", array(
+    $path = url("islandora/object/$suffix", array(
       'language' => (object) array('language' => FALSE),
       'absolute' => FALSE,
     ));
+    $target = rtrim($hostvar, '/') . '/' . ltrim($path, '/');
   }
   $query_target = drupal_http_build_query(array('target' => $target));
   $authorization_header = 'Basic ' . base64_encode($admin_user . ':' . $admin_password);
