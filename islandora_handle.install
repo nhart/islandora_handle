@@ -37,6 +37,7 @@ function islandora_handle_uninstall() {
     db_drop_table('islandora_handle_debug_handles');
   }
 }
+
 /**
  * Implements hook_schema().
  */
@@ -66,4 +67,13 @@ function islandora_handle_schema() {
     'primary key' => array('cmodel', 'datastream'),
   );
   return $schema;
+}
+
+/**
+ * Remove existing DC handle configs as they are automatically appended.
+ */
+function islandora_handle_update_7001(&$sandbox) {
+  db_delete('islandora_handle_apply_handle')
+    ->condition('datastream', 'DC')
+    ->execute();
 }

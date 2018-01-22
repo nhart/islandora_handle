@@ -47,6 +47,7 @@ function islandora_handle_construct_handle(AbstractObject $object) {
       ->fields(array(
         'suffix' => $suffix,
         'handle' => $handle_service_url,
+        'location' => $target,
       ))
       ->execute();
     return $response;
@@ -58,6 +59,50 @@ function islandora_handle_construct_handle(AbstractObject $object) {
     ),
     'data' => $query_target,
     'method' => 'POST',
+  ));
+  return $response;
+}
+
+/**
+ * Heavy lifting to go out and get the location that a Handle points to.
+ *
+ * @param string $handle
+ *   A Handle that we are getting the location for in prefix/suffix form.
+ *
+ * @return object
+ *   An object describing the response of the get.
+ */
+function islandora_handle_get_handle_location($handle) {
+  if (variable_get('islandora_handle_debug_mode', FALSE)) {
+    // Need to munge just the suffix out for debug case.
+    $prefix = variable_get('islandora_handle_server_prefix', '1234567');
+    $suffix = str_replace("$prefix/", '', $handle);
+    $response = new stdClass();
+    $response->code = 204;
+    $location = db_select('islandora_handle_debug_handles', 'd')
+      ->fields('d', array('location'))
+      ->condition('suffix', $suffix, '=')
+      ->execute()
+      ->fetchField();
+    if ($location) {
+      $response->headers = array(
+        'location' => $location,
+      );
+    }
+    else {
+      $response->code = 404;
+    }
+    return $response;
+  }
+  $admin_user = variable_get('islandora_handle_server_admin_username', 'handleAdmin');
+  $admin_password = variable_get('islandora_handle_server_admin_password', 'superSecretPassword');
+  $authorization_header = 'Basic ' . base64_encode($admin_user . ':' . $admin_password);
+  $handle_url = url(variable_get('islandora_handle_server_url', 'http://localhost:8080/handle-service') . '/' . $handle, array());
+  $response = drupal_http_request($handle_url, array(
+    'headers' => array(
+      'Authorization' => $authorization_header,
+    ),
+    'method' => 'GET',
   ));
   return $response;
 }
@@ -77,9 +122,12 @@ function islandora_handle_update_handle_url($handle, $target) {
   if (variable_get('islandora_handle_debug_mode', FALSE)) {
     $response = new stdClass();
     $response->code = 200;
+    // Munge out of the suffix out of the Handle.
+    $prefix = variable_get('islandora_handle_server_prefix', '1234567');
+    $suffix = str_replace("$prefix/", '', $handle);
     db_update('islandora_handle_debug_handles')
-      ->fields(array('handle' => $target))
-      ->condition('handle', $handle, '=')
+      ->fields(array('location' => $target))
+      ->condition('suffix', $suffix, '=')
       ->execute();
     return $response;
   }
@@ -158,17 +206,21 @@ function islandora_handle_append_handle(AbstractObject $object, $datastream, $xs
   if ($did_load_ok) {
     $xslt->importStylesheet($xsl_transform);
     $xslt->setParameter('', 'handle_value', $handle_url);
-    $ds_output = $xslt->transformToXml($input);
+    $ds_output = $xslt->transformToDoc($input);
     if ($ds_output) {
-      $object[$datastream]->content = $ds_output;
-      return array(
-        'success' => TRUE,
-        'message' => array(
-          'message' => t('Appended Handle to @ds datastream for @pid!'),
-          'message_sub' => array('@pid' => $object->id, '@ds' => $datastream),
-          'type' => 'dsm',
-        ),
-      );
+      // If there is nothing to change don't make a new version.
+      $xml_content = $ds_output->saveXML();
+      if (!islandora_handle_datastream_content_equal($input, $ds_output)) {
+        $object[$datastream]->content = $xml_content;
+        return array(
+          'success' => TRUE,
+          'message' => array(
+            'message' => t('Appended Handle to @ds datastream for @pid!'),
+            'message_sub' => array('@pid' => $object->id, '@ds' => $datastream),
+            'type' => 'dsm',
+          ),
+        );
+      }
     }
     else {
       return array(
@@ -200,14 +252,13 @@ function islandora_handle_append_handle(AbstractObject $object, $datastream, $xs
  *
  * @param AbstractObject $object
  *   An AbstractObject representing an object within Fedora.
- *
  * @param bool $service
  *   Whether this is the service URL or the Handle.net URL.
  *
  * @return string
  *   The full Handle Service URL containing the Handle.
  */
-function islandora_handle_construct_url($object, $service) {
+function islandora_handle_construct_url(AbstractObject $object, $service) {
   $suffix = islandora_handle_construct_suffix($object);
   $prefix = variable_get('islandora_handle_server_prefix', '1234567');
 
@@ -229,7 +280,7 @@ function islandora_handle_construct_url($object, $service) {
  * @return string
  *   The full Handle Service URL containing the Handle.
  */
-function islandora_handle_construct_suffix($object) {
+function islandora_handle_construct_suffix(AbstractObject $object) {
   // For now we are just specifying that the suffix is the PID of the object.
   // In the future we can modify this as we see fit.
   return $object->id;
@@ -282,11 +333,35 @@ function islandora_handle_query_for_handle(AbstractObject $object) {
  * @return array
  *   An array describing the result of the database query.
  */
-function islandora_handle_retrieve_configurations_by_cmodels($models) {
+function islandora_handle_retrieve_configurations_by_cmodels(array $models) {
   $handle_results = db_select('islandora_handle_apply_handle', 'h')
     ->fields('h', array('cmodel', 'datastream', 'xsl_location'))
     ->condition('cmodel', $models)
     ->execute()
     ->fetchAll();
   return $handle_results;
+}
+
+/**
+ * Helper to determine whether the Handle has already been added in metadata.
+ *
+ * @param DOMDocument $alpha
+ *   The content of the datastream currently in DOMDocument form.
+ * @param DOMDocument $bravo
+ *   THe XML output of the transform.
+ *
+ * @return bool
+ *   TRUE if it exists, FALSE otherwise,
+ */
+function islandora_handle_datastream_content_equal(DOMDocument $alpha, DOMDocument $bravo) {
+  $docs = array(
+    $alpha,
+    $bravo,
+  );
+  foreach ($docs as $doc) {
+    $doc->formatOutput = TRUE;
+    $doc->preserveWhiteSpace = FALSE;
+    $doc->normalizeDocument();
+  }
+  return $alpha->saveXML() == $bravo->saveXML();
 }
